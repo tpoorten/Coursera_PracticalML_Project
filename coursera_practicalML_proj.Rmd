@@ -1,0 +1,211 @@
+---
+title: "Coursera Practical ML Project"
+author: "Tom Poorten"
+date: "November 22, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+```
+
+## Read in data
+
+```{r read_data, warning=FALSE, message=FALSE}
+# rm(list=ls())
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(AppliedPredictiveModeling))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(knitr))
+
+setwd("Z:/Pairwise/DataScience/ELN/tpoorten/learning/")
+training.all = read_csv("pml-training.csv", progress = F)
+validation = read_csv("pml-testing.csv", progress = F)
+```
+
+## Split data into training and testing
+
+```{r split_data}
+# Split data
+inTrain = createDataPartition(training.all$classe, p = 0.8, list = F)
+training = training.all[inTrain,]
+testing = training.all[-inTrain,]
+```
+
+## Data preprocessing
+
+Preprocessing steps run on training and testing datasets
+
+* Remove irrelevant variables (index, timestamps) and outcome variable
+* Remove variables with near zero variance
+* Convert user name variable into numeric
+* Filter out non-numeric variables and variables with missing data NAs 
+  + When missing data are present in a variable, most instances are missing, so imputation would probably not work well
+
+
+
+```{r preprocessing}
+# Preprocess
+# Remove index, timestamp, and outcome variable
+training.vars = training[,!grepl("classe|X1|raw_timestamp_part_1|aw_timestamp_part_2|cvtd_timestamp|new_window|num_window", colnames(training))]
+testing.vars = testing[,!grepl("classe|X1|raw_timestamp_part_1|aw_timestamp_part_2|cvtd_timestamp|new_window|num_window", colnames(testing))]
+
+# Near zero variance
+nzv <- nearZeroVar(training.vars, saveMetrics= TRUE)
+nzv.keep = rownames(nzv)[which(!nzv$nzv)]
+training.vars = training.vars %>% select(nzv.keep)
+testing.vars = testing.vars %>% select(nzv.keep)
+
+# Create numeric user name variable
+training.vars$user_name_num = as.numeric(as.factor(training.vars$user_name))
+testing.vars$user_name_num = as.numeric(as.factor(testing.vars$user_name))
+
+# Check out how many missing values in each variable
+# apply(training, 2, function(x) table(is.na(x)))
+training.vars.nomissing = training.vars %>% select_if(is.numeric) %>% select_if(function(x){!any(is.na(x))})
+testing.vars.nomissing = testing.vars %>% select(colnames(training.vars.nomissing))
+
+# Add outcome variable back in
+training.vars.nomissing = cbind(training.vars.nomissing, classe = training$classe)
+testing.vars.nomissing = cbind(testing.vars.nomissing, classe = testing$classe)
+```
+
+## Exploratory Data Analysis - PCA
+
+Run PCA with `prcomp()`
+
+1. Center and scale the data.
+2. First run PCA on whole dataset except for outcome variable, and make biplot to show variable contributions to PC1 and PC2. Use outcome 'classe' as the color variable.
+  + Various variables are making substantial contributions to PCs.
+  + There is no apparent clustering of the 'classe' outcome variable, suggesting that simple discriminant analysis would not perform well. More complex ML models (e.g. Random Forest) are likely to perform better.
+3. Repeat PCA plot showing 'user_name' as the color variable.
+  + There is a strong clustering pattern associated with user_name, suggesting that each user's motion metrics are somewhat distinctive.
+
+```{r pca}
+training.vars.nomissing.preproc = preProcess(training.vars.nomissing, method = c("center","scale"))
+training.vars.nomissing.preproc = predict(training.vars.nomissing.preproc, training.vars.nomissing)
+
+testing.vars.nomissing.preproc = preProcess(training.vars.nomissing, method = c("center","scale"))
+testing.vars.nomissing.preproc = predict(testing.vars.nomissing.preproc, testing.vars.nomissing)
+
+library(ggfortify)
+autoplot(prcomp(training.vars.nomissing.preproc[,-c(54)]), data = training, 
+         colour = 'classe',
+         loadings = TRUE, loadings.colour = 'blue',
+         loadings.label = TRUE, loadings.label.size = 3, main = "PCA, 'classe' as the color variable")
+autoplot(prcomp(training.vars.nomissing.preproc[,-c(54)]), data = training, 
+         colour = 'user_name',
+         loadings = TRUE, loadings.colour = 'blue',
+         loadings.label = TRUE, loadings.label.size = 3, main = "PCA, 'user_name' as the color variable")
+
+```
+
+## Run Models
+
+* Run several ML models on training dataset with 5 fold cross-validation
+* Assess model accurary and error with test dataset
+
+
+### Linear discriminatic analysis
+
+* Run model
+* Display confusion matrix
+
+```{r}
+# Set seed for reproducibility
+set.seed(12345)
+
+# Create cross-validation control object
+ctrl = trainControl(method = "cv", number = 5)
+
+modFit.lda = train(classe ~ ., method = "lda", data = training.vars.nomissing.preproc, trControl = ctrl)
+modFit.lda.pred = predict(modFit.lda, training.vars.nomissing.preproc[,-54])
+modFit.lda.accuracy = length(which(modFit.lda.pred == testing.vars.nomissing.preproc$classe)) / length(modFit.lda.pred)
+modFit.lda.oos.error = 1 - modFit.lda.accuracy
+confusionMatrix(testing.vars.nomissing.preproc$classe, predict(modFit.lda, testing.vars.nomissing.preproc[,-54]))
+```
+
+### Quadratic discriminant analysis
+
+* Run model
+* Display confusion matrix
+
+```{r}
+modFit.qda = train(classe ~ ., method = c("qda"), data = training.vars.nomissing.preproc, trControl = ctrl)
+modFit.qda.pred = predict(modFit.qda, testing.vars.nomissing.preproc[,-54])
+modFit.qda.accuracy = length(which(modFit.qda.pred == testing.vars.nomissing.preproc$classe)) / length(modFit.qda.pred)
+modFit.qda.oos.error = 1 - modFit.qda.accuracy
+confusionMatrix(testing.vars.nomissing.preproc$classe, predict(modFit.qda, testing.vars.nomissing.preproc[,-54]))
+```
+
+### Naive Bayes model
+
+* Run model
+* Display confusion matrix
+
+```{r}
+modFit.nb = train(classe ~ ., method = "naive_bayes", data = training.vars.nomissing.preproc, trControl = ctrl)
+modFit.nb.pred = predict(modFit.nb, testing.vars.nomissing.preproc[,-54])
+modFit.nb.accuracy = length(which(modFit.nb.pred == testing.vars.nomissing.preproc$classe)) / length(modFit.nb.pred)
+modFit.nb.oos.error = 1 - modFit.nb.accuracy
+
+confusionMatrix(testing.vars.nomissing.preproc$classe, predict(modFit.nb, testing.vars.nomissing.preproc[,-54]))
+```
+
+### Classification tree
+
+* Run CART model
+* Display confusion matrix and decision tree
+
+```{r}
+modFit.rpart = train(classe ~ ., method = "rpart", data = training.vars.nomissing.preproc, trControl = ctrl)
+modFit.rpart.pred = predict(modFit.rpart, testing.vars.nomissing.preproc[,-54])
+modFit.rpart.accuracy = length(which(modFit.rpart.pred == testing.vars.nomissing.preproc$classe)) / length(modFit.rpart.pred)
+modFit.rpart.oos.error = 1 - modFit.rpart.accuracy
+
+confusionMatrix(testing.vars.nomissing.preproc$classe, predict(modFit.rpart, testing.vars.nomissing.preproc[,-54]))
+suppressPackageStartupMessages(library(rattle))
+fancyRpartPlot(modFit.rpart$finalModel)
+```
+
+### Random Forest
+
+* Run model
+* Display confusion matrix
+* Display plot showing #Randomly Selected Predictors vs. Accuracy
+* Show variable importance bar plot
+
+```{r}
+# Long run time, save results for Rmd report generation
+# modFit.rf = train(classe ~ ., method = "rf", data = training.vars.nomissing.preproc, trControl = ctrl)
+# save(list = c("modFit.rf"), file = "MLproj_RandomForest.Rdata")
+load(file = "MLproj_RandomForest.Rdata")
+modFit.rf.pred = predict(modFit.rf, testing.vars.nomissing.preproc[,-54])
+modFit.rf.accuracy = length(which(modFit.rf.pred == testing.vars.nomissing.preproc$classe)) / length(modFit.rf.pred)
+modFit.rf.oos.error = 1 - modFit.rf.accuracy
+
+confusionMatrix(testing.vars.nomissing.preproc$classe, predict(modFit.rf, testing.vars.nomissing.preproc[,-54]))
+plot(modFit.rf)
+
+modFit.rf.varImportance = varImp(modFit.rf)$importance
+modFit.rf.varImportance$variable = rownames(modFit.rf.varImportance)
+
+ggplot(modFit.rf.varImportance, aes(reorder(variable, Overall), Overall)) + 
+  geom_bar(stat="identity") +
+  # theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+  
+```
+
+
+## Model Comparison
+
+As summarized in the table below, the Random Forest model performed the best out of all the ML models tested in this analysis with the lowest out of sample error. 
+
+```{r results_table, echo = FALSE}
+results = tibble("Model" = c("LDA", "QDA", "Naive Bayes", "CART", "Random Forest"),
+                 "Accuracy" = round(c(modFit.lda.accuracy, modFit.qda.accuracy, modFit.nb.accuracy, modFit.rpart.accuracy, modFit.rf.accuracy),3),
+                 "Out of sample error" = round(c(modFit.lda.oos.error, modFit.qda.oos.error, modFit.nb.oos.error, modFit.rpart.oos.error, modFit.rf.oos.error),3))
+
+kable(results)
+```
